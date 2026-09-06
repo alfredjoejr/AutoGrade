@@ -1,34 +1,79 @@
-import { Search, ZoomIn, ZoomOut, Maximize, AlertCircle, CheckCircle2, XCircle } from "lucide-react";
+import { Search, ZoomIn, ZoomOut, Maximize, AlertCircle, CheckCircle2, XCircle, ChevronLeft, ChevronRight, Users } from "lucide-react";
 import Image from "next/image";
 import { useState } from "react";
-
-type QuestionResult = {
-  id: number;
-  detected: string | null;
-  correct: string;
-  status: 'correct' | 'incorrect' | 'ambiguous';
-  confidence?: number;
-};
+import type { StudentGradingResult, QuestionResult } from "@/lib/types";
 
 export function ModerationView({ 
   totalQuestions, 
-  results, 
-  setResults, 
-  scannedImage 
+  students,
+  setStudents,
+  onModerationComplete
 }: { 
   totalQuestions: number,
-  results: QuestionResult[],
-  setResults: (res: QuestionResult[]) => void,
-  scannedImage: string | null
+  students: StudentGradingResult[],
+  setStudents: (s: StudentGradingResult[]) => void,
+  onModerationComplete: (students: StudentGradingResult[]) => void
 }) {
-  const handleOverride = (id: number, overrideAnswer: string) => {
-    setResults(results.map(q => {
-      if (q.id === id) {
+  const [currentIndex, setCurrentIndex] = useState(0);
+
+  if (students.length === 0) {
+    return (
+      <div className="h-full flex items-center justify-center">
+        <div className="text-center space-y-3">
+          <Users className="w-12 h-12 text-slate-300 mx-auto" />
+          <h3 className="text-lg font-bold text-slate-600">No Students to Review</h3>
+          <p className="text-sm text-slate-400">Upload student answer sheets in the Setup tab first.</p>
+        </div>
+      </div>
+    );
+  }
+
+  const currentStudent = students[currentIndex];
+  const results = currentStudent.results;
+  const isLastStudent = currentIndex === students.length - 1;
+  const reviewedCount = students.filter(s => s.status === 'reviewed').length;
+
+  // Compute live score for current student
+  const correctCount = results.filter(r => r.status === 'correct').length;
+  const liveScore = Math.round((correctCount / totalQuestions) * 100);
+
+  const handleOverride = (questionId: number, overrideAnswer: string) => {
+    const updatedResults = results.map(q => {
+      if (q.id === questionId) {
         const isCorrect = overrideAnswer === q.correct;
-        return { ...q, detected: overrideAnswer, status: isCorrect ? 'correct' : 'incorrect' };
+        return { ...q, detected: overrideAnswer, status: (isCorrect ? 'correct' : 'incorrect') as QuestionResult['status'] };
       }
       return q;
-    }));
+    });
+
+    // Update the student in the array
+    const updatedStudents = [...students];
+    const updatedCorrectCount = updatedResults.filter(r => r.status === 'correct').length;
+    const updatedScore = Math.round((updatedCorrectCount / totalQuestions) * 100 * 100) / 100;
+    
+    updatedStudents[currentIndex] = {
+      ...currentStudent,
+      results: updatedResults,
+      score: updatedScore,
+    };
+    setStudents(updatedStudents);
+  };
+
+  const handleApproveAndNext = () => {
+    // Mark current student as reviewed
+    const updatedStudents = [...students];
+    updatedStudents[currentIndex] = {
+      ...currentStudent,
+      status: 'reviewed',
+    };
+    setStudents(updatedStudents);
+
+    if (isLastStudent) {
+      // All students reviewed — go to analytics
+      onModerationComplete(updatedStudents);
+    } else {
+      setCurrentIndex(prev => prev + 1);
+    }
   };
 
   const getStatusColor = (status: QuestionResult['status']) => {
@@ -47,6 +92,22 @@ export function ModerationView({
     }
   };
 
+  // Generate dynamic answer option buttons based on current question's correct answer range
+  const getOptionLetters = (): string[] => {
+    // Find the max letter used in any correct answer to infer option count
+    let maxCharCode = 68; // Default: D
+    results.forEach(r => {
+      if (r.correct) {
+        const code = r.correct.charCodeAt(0);
+        if (code > maxCharCode) maxCharCode = code;
+      }
+    });
+    const count = maxCharCode - 64; // A=65, so 65-64=1 option... we need at least to include all
+    return Array.from({ length: Math.max(count, 4) }, (_, i) => String.fromCharCode(65 + i));
+  };
+
+  const options = getOptionLetters();
+
   return (
     <div className="h-full animate-in fade-in slide-in-from-bottom-4 duration-500 flex flex-col lg:flex-row gap-6">
       
@@ -54,7 +115,8 @@ export function ModerationView({
       <div className="flex-1 bg-white rounded-xl overflow-hidden flex flex-col relative border border-slate-200 shadow-inner">
         <div className="absolute top-4 left-4 right-4 flex justify-between items-center z-10 pointer-events-none">
           <div className="bg-white/90 backdrop-blur text-slate-900 text-sm px-3 py-1.5 rounded-md border border-slate-200 shadow-sm pointer-events-auto">
-            Student: <strong>John Doe (ID: 9482)</strong>
+            Student: <strong>{currentStudent.studentId}</strong>
+            <span className="text-slate-400 ml-2 text-xs">({currentStudent.fileName})</span>
           </div>
           <div className="flex gap-2 pointer-events-auto">
             <button className="p-2 bg-white/90 hover:bg-slate-50 backdrop-blur text-slate-600 rounded-md border border-slate-200 shadow-sm transition-colors">
@@ -69,17 +131,59 @@ export function ModerationView({
           </div>
         </div>
         
-        {/* Mock Document Area */}
+        {/* Document Area */}
         <div className="flex-1 relative w-full h-full min-h-[400px]">
-          <Image 
-            src={scannedImage || "https://picsum.photos/seed/document1/800/1200"} 
-            alt="Scanned Exam Paper" 
-            fill 
-            className="object-contain"
-            referrerPolicy="no-referrer"
-          />
-          {/* Mock Overlay Bounding Box */}
-          <div className="absolute top-[35%] left-[20%] w-[60%] h-[12%] border-2 border-amber-400 bg-amber-50/50 shadow-[0_0_15px_rgba(245,158,11,0.2)] rounded pointer-events-none animate-pulse z-10"></div>
+          {currentStudent.imageBase64 ? (
+            <Image 
+              src={currentStudent.imageBase64} 
+              alt={`Answer sheet for ${currentStudent.studentId}`} 
+              fill 
+              className="object-contain"
+              referrerPolicy="no-referrer"
+            />
+          ) : (
+            <div className="flex items-center justify-center h-full text-slate-400">
+              No image available
+            </div>
+          )}
+        </div>
+
+        {/* Student Navigation Bar */}
+        <div className="p-3 border-t border-slate-200 bg-slate-50 flex items-center justify-between">
+          <button 
+            onClick={() => setCurrentIndex(prev => Math.max(0, prev - 1))}
+            disabled={currentIndex === 0}
+            className="flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-slate-600 bg-white border border-slate-200 rounded-md hover:bg-slate-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <ChevronLeft className="w-3.5 h-3.5" /> Previous
+          </button>
+          
+          <div className="flex items-center gap-2">
+            {students.map((s, idx) => (
+              <button
+                key={s.studentId}
+                onClick={() => setCurrentIndex(idx)}
+                className={`w-7 h-7 rounded text-[10px] font-bold transition-all border ${
+                  idx === currentIndex
+                    ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
+                    : s.status === 'reviewed'
+                    ? 'bg-emerald-100 text-emerald-700 border-emerald-200'
+                    : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'
+                }`}
+                title={s.studentId}
+              >
+                {idx + 1}
+              </button>
+            ))}
+          </div>
+
+          <button 
+            onClick={() => setCurrentIndex(prev => Math.min(students.length - 1, prev + 1))}
+            disabled={isLastStudent}
+            className="flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-slate-600 bg-white border border-slate-200 rounded-md hover:bg-slate-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            Next <ChevronRight className="w-3.5 h-3.5" />
+          </button>
         </div>
       </div>
 
@@ -88,11 +192,14 @@ export function ModerationView({
         <div className="p-4 border-b border-slate-200 flex justify-between items-center bg-slate-50 rounded-t-xl">
           <div>
             <h3 className="text-sm font-bold flex items-center gap-2">
-              <AlertCircle className="w-4 h-4 text-amber-500" /> Flagged Responses
+              <AlertCircle className="w-4 h-4 text-amber-500" /> Responses
             </h3>
+            <p className="text-[10px] text-slate-400 mt-0.5">
+              {reviewedCount} of {students.length} students reviewed
+            </p>
           </div>
           <div className="px-2 py-0.5 bg-blue-50 text-blue-700 font-bold text-[10px] rounded border border-blue-100 uppercase tracking-wider">
-            Score: 71%
+            Score: {liveScore}%
           </div>
         </div>
 
@@ -123,7 +230,7 @@ export function ModerationView({
                 
                 {/* Override Actions */}
                 <div className={`flex gap-1 transition-opacity ${q.status === 'ambiguous' ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}>
-                  {['A', 'B', 'C', 'D'].map(opt => (
+                  {options.map(opt => (
                     <button
                       key={opt}
                       onClick={() => handleOverride(q.id, opt)}
@@ -143,8 +250,11 @@ export function ModerationView({
         </div>
         
         <div className="p-4 border-t border-slate-200 bg-slate-50 rounded-b-xl">
-          <button className="w-full py-2.5 bg-blue-600 text-white text-sm font-bold rounded-md hover:bg-blue-700 transition-colors shadow-sm">
-            Approve & Next
+          <button 
+            onClick={handleApproveAndNext}
+            className="w-full py-2.5 bg-blue-600 text-white text-sm font-bold rounded-md hover:bg-blue-700 transition-colors shadow-sm"
+          >
+            {isLastStudent ? 'Approve & View Results' : `Approve & Next (${currentIndex + 1}/${students.length})`}
           </button>
         </div>
       </div>

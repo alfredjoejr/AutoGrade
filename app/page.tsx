@@ -4,17 +4,20 @@ import { useState } from "react";
 import { UploadView } from "@/components/upload-view";
 import { ModerationView } from "@/components/moderation-view";
 import { AnalyticsView } from "@/components/analytics-view";
-import { UploadCloud, Eye, BarChart3, GraduationCap } from "lucide-react";
+import { UploadCloud, Eye, BarChart3 } from "lucide-react";
+import type { StudentGradingResult } from "@/lib/types";
 
 type ViewState = 'UPLOAD' | 'MODERATE' | 'ANALYZE';
 
 export default function Home() {
   const [currentView, setCurrentView] = useState<ViewState>('UPLOAD');
   const [totalQuestions, setTotalQuestions] = useState(25);
+  const [threshold, setThreshold] = useState(85);
   
-  // Grading State
-  const [gradingResults, setGradingResults] = useState<any[]>([]);
-  const [scannedImage, setScannedImage] = useState<string | null>(null);
+  // Batch grading state
+  const [batchStudents, setBatchStudents] = useState<StudentGradingResult[]>([]);
+  const [masterKey, setMasterKey] = useState<Record<number, string>>({});
+  const [batchId, setBatchId] = useState<string>('');
 
   const tabs = [
     { id: 'UPLOAD', label: '1. Setup & Upload', icon: UploadCloud },
@@ -22,11 +25,23 @@ export default function Home() {
     { id: 'ANALYZE', label: '3. Analytics', icon: BarChart3 },
   ] as const;
 
-  const handleGradingComplete = (results: any[], imageBase64: string) => {
-    setGradingResults(results);
-    setScannedImage(imageBase64);
+  const handleBatchComplete = (
+    students: StudentGradingResult[], 
+    key: Record<number, string>,
+    sessionId: string
+  ) => {
+    setBatchStudents(students);
+    setMasterKey(key);
+    setBatchId(sessionId);
     setCurrentView('MODERATE');
   };
+
+  const handleModerationComplete = (updatedStudents: StudentGradingResult[]) => {
+    setBatchStudents(updatedStudents);
+    setCurrentView('ANALYZE');
+  };
+
+  const studentsGraded = batchStudents.length;
 
   return (
     <div className="h-screen w-full bg-slate-50 flex flex-col font-sans overflow-hidden">
@@ -77,19 +92,25 @@ export default function Home() {
               <UploadView 
                 totalQuestions={totalQuestions} 
                 setTotalQuestions={setTotalQuestions} 
-                onGradeComplete={handleGradingComplete}
+                onBatchComplete={handleBatchComplete}
               />
             )}
             {currentView === 'MODERATE' && (
               <ModerationView 
                 totalQuestions={totalQuestions} 
-                results={gradingResults}
-                setResults={setGradingResults}
-                scannedImage={scannedImage}
+                students={batchStudents}
+                setStudents={setBatchStudents}
+                onModerationComplete={handleModerationComplete}
               />
             )}
             {currentView === 'ANALYZE' && (
-              <AnalyticsView totalQuestions={totalQuestions} />
+              <AnalyticsView 
+                totalQuestions={totalQuestions}
+                students={batchStudents}
+                masterKey={masterKey}
+                batchId={batchId}
+                threshold={threshold}
+              />
             )}
           </div>
         </section>
@@ -107,10 +128,12 @@ export default function Home() {
         </div>
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-1">
-            <div className="w-20 h-1 bg-slate-800 rounded-full overflow-hidden">
-              <div className="h-full bg-blue-500 w-3/4"></div>
-            </div>
-            <span className="text-[10px] text-slate-400 ml-2 uppercase">Processing Batch...</span>
+            <span className="text-[10px] text-slate-400 uppercase">
+              {studentsGraded > 0 
+                ? `Batch: ${studentsGraded} student${studentsGraded !== 1 ? 's' : ''} graded`
+                : 'No batch loaded'
+              }
+            </span>
           </div>
         </div>
       </footer>

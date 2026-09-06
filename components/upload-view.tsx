@@ -13,18 +13,20 @@ import {
   Check,
   Camera,
   AlertTriangle,
-  X
+  X,
+  Users
 } from "lucide-react";
 import { useState, useRef } from "react";
+import type { StudentGradingResult, QuestionResult } from "@/lib/types";
 
 export function UploadView({ 
   totalQuestions, 
   setTotalQuestions,
-  onGradeComplete
+  onBatchComplete
 }: { 
   totalQuestions: number, 
   setTotalQuestions: (n: number) => void,
-  onGradeComplete: (results: any[], image: string) => void 
+  onBatchComplete: (students: StudentGradingResult[], masterKey: Record<number, string>, batchId: string) => void 
 }) {
   const [threshold, setThreshold] = useState(85);
   const [masterKey, setMasterKey] = useState<Record<number, string>>({});
@@ -41,6 +43,10 @@ export function UploadView({
   const [keyConfidences, setKeyConfidences] = useState<Record<number, number>>({});
   const [extractionNotice, setExtractionNotice] = useState<string | null>(null);
   const masterKeyFileInputRef = useRef<HTMLInputElement>(null);
+
+  // Batch upload progress state
+  const [batchProgress, setBatchProgress] = useState({ current: 0, total: 0 });
+  const [batchFiles, setBatchFiles] = useState<File[]>([]);
 
   const questionPresets = [10, 20, 25, 50, 100];
   const optionPresets = [
@@ -87,6 +93,22 @@ export function UploadView({
   const configuredCount = Object.keys(masterKey).filter(
     (k) => Number(k) >= 1 && Number(k) <= totalQuestions && masterKey[Number(k)]
   ).length;
+
+  /** Extract student ID from filename: "STU001.jpg" → "STU001" */
+  const extractStudentId = (fileName: string): string => {
+    const lastDot = fileName.lastIndexOf('.');
+    return lastDot > 0 ? fileName.substring(0, lastDot) : fileName;
+  };
+
+  /** Read a file as base64 data URL */
+  const readFileAsBase64 = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(reader.result as string);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  };
 
   // Handle uploading and extracting from a master key sheet scan via Gemini
   const handleMasterKeyUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -153,30 +175,38 @@ export function UploadView({
     }
   };
 
-  // Handle student exam papers upload & grading
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  // Handle batch student exam papers upload & grading
+  const handleBatchUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
 
     if (!isKeyConfigured) {
       handleInitializeKey();
     }
 
+    const fileArray = Array.from(files);
+    setBatchFiles(fileArray);
     setIsGrading(true);
+    setBatchProgress({ current: 0, total: fileArray.length });
 
-    try {
-      const reader = new FileReader();
-      reader.onloadend = async () => {
-        const base64DataUrl = reader.result as string;
+    // Ensure master key has answers populated
+    const effectiveKey = { ...masterKey };
+    for (let i = 1; i <= totalQuestions; i++) {
+      if (!effectiveKey[i]) {
+        effectiveKey[i] = currentOptions[0] || "A";
+      }
+    }
+
+    const batchId = crypto.randomUUID();
+    const gradedStudents: StudentGradingResult[] = [];
+
+    for (let idx = 0; idx < fileArray.length; idx++) {
+      const file = fileArray[idx];
+      setBatchProgress({ current: idx + 1, total: fileArray.length });
+
+      try {
+        const base64DataUrl = await readFileAsBase64(file);
         const base64Data = base64DataUrl.split(',')[1];
-
-        // Ensure master key has answers populated
-        const effectiveKey = { ...masterKey };
-        for (let i = 1; i <= totalQuestions; i++) {
-          if (!effectiveKey[i]) {
-            effectiveKey[i] = currentOptions[0] || "A";
-          }
-        }
 
         const res = await fetch('/api/grade', {
           method: 'POST',
@@ -191,19 +221,38 @@ export function UploadView({
         });
 
         const data = await res.json();
-        
+
         if (!res.ok) {
-          throw new Error(data.error || 'Failed to grade paper');
+          console.error(`Failed to grade ${file.name}:`, data.error);
+          continue;
         }
 
-        onGradeComplete(data.results, base64DataUrl);
-      };
-      reader.readAsDataURL(file);
-    } catch (err) {
-      console.error(err);
-      alert("Error grading paper. Please try again.");
-    } finally {
-      setIsGrading(false);
+        const results: QuestionResult[] = data.results;
+        const correctCount = results.filter(r => r.status === 'correct').length;
+        const score = Math.round((correctCount / totalQuestions) * 100 * 100) / 100;
+
+        gradedStudents.push({
+          studentId: extractStudentId(file.name),
+          fileName: file.name,
+          imageBase64: base64DataUrl,
+          results,
+          score,
+          status: 'auto-graded',
+          gradedAt: new Date().toISOString(),
+        });
+      } catch (err) {
+        console.error(`Error grading ${file.name}:`, err);
+      }
+    }
+
+    setIsGrading(false);
+    setBatchProgress({ current: 0, total: 0 });
+    setBatchFiles([]);
+
+    if (gradedStudents.length > 0) {
+      onBatchComplete(gradedStudents, effectiveKey, batchId);
+    } else {
+      alert("No files were successfully graded. Please check your uploads and try again.");
     }
   };
 
@@ -233,25 +282,54 @@ export function UploadView({
             <input 
               type="file" 
               ref={fileInputRef} 
-              onChange={handleFileChange} 
+              onChange={handleBatchUpload} 
               accept="image/png, image/jpeg, application/pdf" 
-              className="hidden" 
+              className="hidden"
+              multiple 
             />
             {isGrading ? (
               <>
                 <div className="w-16 h-16 bg-white rounded-xl border border-slate-200 shadow-sm flex items-center justify-center mb-4">
                   <Loader2 className="w-8 h-8 text-blue-500 animate-spin" />
                 </div>
-                <h3 className="text-sm font-bold text-slate-900 mb-1">ANALYZING DOCUMENT...</h3>
-                <p className="text-xs text-slate-500 mb-6 max-w-sm mx-auto">Running Vision-Language Model inference</p>
+                <h3 className="text-sm font-bold text-slate-900 mb-1">
+                  GRADING STUDENT {batchProgress.current} OF {batchProgress.total}...
+                </h3>
+                <p className="text-xs text-slate-500 mb-4 max-w-sm mx-auto">
+                  Running Vision-Language Model inference on each answer sheet
+                </p>
+                {/* Progress Bar */}
+                <div className="w-full max-w-xs mx-auto">
+                  <div className="flex justify-between text-[10px] font-bold text-slate-500 mb-1">
+                    <span>{batchProgress.current} / {batchProgress.total}</span>
+                    <span>{Math.round((batchProgress.current / batchProgress.total) * 100)}%</span>
+                  </div>
+                  <div className="w-full h-2 bg-slate-200 rounded-full overflow-hidden">
+                    <div 
+                      className="h-full bg-blue-600 rounded-full transition-all duration-500 ease-out"
+                      style={{ width: `${(batchProgress.current / batchProgress.total) * 100}%` }}
+                    />
+                  </div>
+                  {batchFiles[batchProgress.current - 1] && (
+                    <p className="text-[10px] text-slate-400 mt-2 truncate">
+                      Current: {batchFiles[batchProgress.current - 1].name}
+                    </p>
+                  )}
+                </div>
               </>
             ) : (
               <>
                 <div className="w-16 h-16 bg-white rounded-xl border border-slate-200 shadow-sm flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
                   <FileType className="w-8 h-8 text-blue-500" />
                 </div>
-                <h3 className="text-sm font-bold text-slate-900 mb-1">DRAG AND DROP SCANNED SHEETS</h3>
-                <p className="text-xs text-slate-500 mb-6 max-w-sm mx-auto">Upload PDF or image batches (JPG, PNG). We recommend 300 DPI scans for best AI accuracy.</p>
+                <h3 className="text-sm font-bold text-slate-900 mb-1">UPLOAD STUDENT ANSWER SHEETS</h3>
+                <p className="text-xs text-slate-500 mb-2 max-w-sm mx-auto">
+                  Select multiple scanned answer sheets (JPG, PNG, PDF). Each file name becomes the Student ID.
+                </p>
+                <div className="inline-flex items-center gap-1.5 bg-blue-50 text-blue-700 text-[10px] font-bold px-2.5 py-1 rounded-full border border-blue-100 mb-4">
+                  <Users className="w-3 h-3" />
+                  Multi-file batch upload supported
+                </div>
                 <button className="px-4 py-2 bg-blue-600 text-white rounded-md text-sm font-medium shadow-sm hover:bg-blue-700 transition-colors">
                   Browse Files
                 </button>
@@ -597,5 +675,3 @@ export function UploadView({
     </div>
   );
 }
-
-
