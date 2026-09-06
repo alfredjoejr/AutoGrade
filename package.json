@@ -1,5 +1,5 @@
 {
-  "name": "ai-studio-applet",
+  "name": "autograde",
   "version": "0.1.0",
   "private": true,
   "scripts": {
@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "clean": "next clean"
+    "clean": "node -e \"fs.rmSync('.next', { recursive: true, force: true }); fs.rmSync('out', { recursive: true, force: true }); fs.rmSync('.turbo', { recursive: true, force: true });\""
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

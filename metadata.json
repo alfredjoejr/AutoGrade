@@ -1,5 +1,5 @@
 {
-  "name": "AutoGrade Pro",
+  "name": "AutoGrade",
   "description": "An AI-powered MCQ grading interface with setup, moderation, and analytics views.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]

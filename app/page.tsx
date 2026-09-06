@@ -35,9 +35,9 @@ export default function Home() {
       <header className="h-16 border-b border-slate-200 bg-white flex items-center justify-between px-6 shrink-0">
         <div className="flex items-center gap-3">
           <div className="w-8 h-8 bg-blue-600 rounded flex items-center justify-center text-white font-bold">
-            G
+            A
           </div>
-          <span className="text-lg font-bold tracking-tight text-slate-900">GradeFlow <span className="text-blue-600">AI</span></span>
+          <span className="text-lg font-bold tracking-tight text-slate-900">AutoGrade <span className="text-blue-600">AI</span></span>
         </div>
         
         <div className="flex gap-2 bg-slate-100 p-1 rounded-lg">

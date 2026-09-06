@@ -1,7 +1,58 @@
+# Dependencies
 node_modules/
+/.pnp
+.pnp.*
+
+# Next.js build & cache artifacts
 .next/
+out/
+build/
+dist/
+.turbo/
+
+# Testing & Coverage
 coverage/
-.DS_Store
-*.log
-.env*
+*.lcov
+.nyc_output
+
+# Environment variables
+.env*.local
+.env
 !.env.example
+
+# Debug and Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# TypeScript & Linter Cache
+*.tsbuildinfo
+.eslintcache
+
+# Temporary & Swap files
+*.tmp
+*.temp
+*~
+*.swp
+*.swo
+*.orig
+
+# Operating System temporary files
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+ehthumbs.db
+[Dd]esktop.ini
+$RECYCLE.BIN/
+
+# Editor / IDE settings
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
