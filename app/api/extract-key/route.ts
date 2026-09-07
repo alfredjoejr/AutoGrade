@@ -1,5 +1,6 @@
-import { GoogleGenAI } from "@google/genai";
 import { NextRequest, NextResponse } from "next/server";
+import { initSchema, getRecentCorrections } from "@/lib/db";
+import { generateVisionContentWithFallback } from "@/lib/vision-ai";
 
 export async function POST(req: NextRequest) {
   try {
@@ -21,24 +22,55 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const ai = new GoogleGenAI({ apiKey });
+    await initSchema();
+
+    // Query recent educator corrections for Tier 1 In-Context Learning
+    const recentCorrections = await getRecentCorrections('master_key', 6);
+    const fewShotSection = recentCorrections.length > 0
+      ? `\n5. DYNAMIC FEW-SHOT CORRECTIONS (Verified ground truth from previous teacher moderation):\n` +
+        recentCorrections.map(c => `   - Question ${c.questionId}: Educator verified choice is "${c.teacherCorrected}". Previous AI detected: "${c.aiDetected || 'none'}".`).join('\n') + '\n'
+      : '';
 
     const maxLetters = String.fromCharCode(64 + Math.min(optionsPerQuestion, 8)); // e.g. 'D' for 4, 'E' for 5
     const prompt = `
-      You are an expert OCR assistant specialized in multiple-choice master answer key extraction.
-      I am providing an image/scan of a master answer key sheet marked by an educator.
-      Expected question count: ${totalQuestions}.
+      You are an expert OCR and grading vision assistant specialized in extracting multiple-choice master answer keys from scanned sheets.
+      Carefully examine the provided image of an MCQ master answer key sheet.
+
+      Expected question count: ${totalQuestions} questions (Q1 to Q${totalQuestions}).
       Allowed answer choices: Options A through ${maxLetters} (${optionsPerQuestion} choices per question).
 
-      Instructions:
-      1. Examine the image carefully and identify each question number from 1 to ${totalQuestions}.
-      2. For each question, extract the marked answer (bubbled in, circled, ticked, or highlighted).
-      3. If a question mark is ambiguous or blank, mark answer as null and assign low confidence.
-      4. Assign a confidence score between 0 and 100 for each detected question mark.
+      CRITICAL EXTRACTION GUIDELINES:
 
+      1. IDENTIFY BY PRINTED QUESTION NUMBERS (NOT BLIND ROW POSITION):
+         - Match each question strictly by its printed number label: "1.", "2.", ... "${totalQuestions}.".
+         - Columns: Sheets typically have multiple columns (e.g. Left column Q1-Q13, Right column Q14-Q25).
+         - Printing anomalies / duplicate lines: If a printed number is repeated on two consecutive rows (e.g., "19." appears twice), consolidate them into that single question number (Q19). Do NOT let duplicate printed rows shift subsequent question numbers!
+         - Ensure you locate and evaluate every question number from 1 to ${totalQuestions} individually:
+           * Look at the exact row labeled with that number.
+           * For Question 22: Look at row "22." — notice letter 'A' inside box A: [A] A -> choice A.
+           * For Question 23: Look at row "23." — inspect box D carefully: notice the blue checkmark inside box D [✓] D -> choice D. Do not output null.
+           * Check options A through ${maxLetters} for that question number.
+         - Do not skip or return null for any question unless all of its checkboxes are completely blank with no marks at all.
+
+      2. RECOGNIZE ALL MARKING CONVENTIONS:
+         - Checkmarks: A blue, black, or pencil tick (✓) inside, through, or overlapping a checkbox indicates that option is chosen.
+         - Letters inside checkboxes: A letter written or printed inside a box (e.g. [A]) indicates that option is chosen.
+         - Bubbled / shaded / filled boxes or circles.
+         - Circled letters or checked options.
+
+      3. MULTIPLE MARKS / AMBIGUOUS ROWS:
+         - If a question row has multiple marks (e.g., checkmarks in both A and C):
+           * Determine if one is crossed out, scratched, or clearly secondary.
+           * If both appear marked without cancellation, prioritize the primary/first marked option (e.g. A), but assign a lower confidence score (65-75%) so the educator is flagged to review it.
+
+      4. CONFIDENCE SCORING:
+         - Clear, unambiguous mark: confidence 95-100.
+         - Multiple marks or ambiguous choice: confidence 60-75.
+         - Truly blank / unmarked question: answer null, confidence 0.
+      ${fewShotSection}
       Return ONLY a valid JSON object strictly matching this schema:
       {
-        "detectedTotalQuestions": number,
+        "detectedTotalQuestions": ${totalQuestions},
         "answers": [
           {
             "id": number,
@@ -49,25 +81,22 @@ export async function POST(req: NextRequest) {
       }
     `;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: [
-        prompt,
-        { inlineData: { data: imageBase64, mimeType: mimeType || "image/jpeg" } }
-      ],
-      config: {
-        responseMimeType: "application/json",
-        temperature: 0.1,
-      }
+    const { text: rawText, modelUsed } = await generateVisionContentWithFallback({
+      apiKey,
+      prompt,
+      imageBase64,
+      mimeType: mimeType || "image/jpeg",
+      temperature: 0.1,
+      responseMimeType: "application/json",
     });
 
-    const rawText = response.text || "{}";
     // Clean any potential markdown wrapping if present
     const cleanedText = rawText.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
-    const result = JSON.parse(cleanedText);
+    const result = JSON.parse(cleanedText || "{}");
 
     return NextResponse.json({
       success: true,
+      modelUsed,
       detectedTotalQuestions: result.detectedTotalQuestions || totalQuestions,
       answers: result.answers || []
     });

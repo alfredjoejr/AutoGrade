@@ -8,16 +8,20 @@ import {
   ArrowRight, 
   RotateCcw, 
   ListOrdered, 
-  Sparkles,
-  Pencil,
-  Check,
-  Camera,
-  AlertTriangle,
-  X,
-  Users
+  Sparkles, 
+  Pencil, 
+  Check, 
+  Camera, 
+  AlertTriangle, 
+  X, 
+  Users,
+  Eye,
+  ChevronDown,
+  ChevronUp
 } from "lucide-react";
-import { useState, useRef } from "react";
+import { useState, useRef, useMemo } from "react";
 import type { StudentGradingResult, QuestionResult } from "@/lib/types";
+import { MasterKeyModal } from "@/components/master-key-modal";
 
 export function UploadView({ 
   totalQuestions, 
@@ -44,6 +48,12 @@ export function UploadView({
   const [extractionNotice, setExtractionNotice] = useState<string | null>(null);
   const masterKeyFileInputRef = useRef<HTMLInputElement>(null);
 
+  // Master key inspection & display states
+  const [masterKeyImage, setMasterKeyImage] = useState<string | null>(null);
+  const [masterKeyFileName, setMasterKeyFileName] = useState<string | null>(null);
+  const [showKeyModal, setShowKeyModal] = useState(false);
+  const [showInlineGrid, setShowInlineGrid] = useState(true);
+
   // Batch upload progress state
   const [batchProgress, setBatchProgress] = useState({ current: 0, total: 0 });
   const [batchFiles, setBatchFiles] = useState<File[]>([]);
@@ -67,6 +77,23 @@ export function UploadView({
   };
 
   const handleKeySelect = (question: number, answer: string) => {
+    const prevAnswer = masterKey[question];
+    if (prevAnswer !== answer) {
+      fetch('/api/corrections', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          questionId: question,
+          source: 'master_key',
+          aiDetected: prevAnswer || null,
+          teacherCorrected: answer,
+          notes: prevAnswer 
+            ? `Educator corrected Master Key Q${question} from ${prevAnswer} to ${answer}`
+            : `Educator filled missing Master Key Q${question} as ${answer}`
+        })
+      }).catch(err => console.error("Failed to log master key correction:", err));
+    }
+
     setMasterKey(prev => ({ ...prev, [question]: answer }));
     // Clear any low-confidence flag once manually touched
     setKeyConfidences(prev => {
@@ -87,11 +114,25 @@ export function UploadView({
   const handleClearKey = () => {
     setMasterKey({});
     setKeyConfidences({});
+    setMasterKeyImage(null);
+    setMasterKeyFileName(null);
     setExtractionNotice(null);
   };
 
   const configuredCount = Object.keys(masterKey).filter(
     (k) => Number(k) >= 1 && Number(k) <= totalQuestions && masterKey[Number(k)]
+  ).length;
+
+  const confidenceValues = Object.entries(keyConfidences)
+    .filter(([q]) => Number(q) <= totalQuestions)
+    .map(([, conf]) => conf);
+
+  const avgConfidence = confidenceValues.length > 0
+    ? Math.round(confidenceValues.reduce((a, b) => a + b, 0) / confidenceValues.length)
+    : null;
+
+  const lowConfidenceCount = Object.entries(keyConfidences).filter(
+    ([qNum, conf]) => Number(qNum) <= totalQuestions && conf < 80
   ).length;
 
   /** Extract student ID from filename: "STU001.jpg" → "STU001" */
@@ -119,55 +160,68 @@ export function UploadView({
     setExtractionNotice(null);
 
     try {
-      const reader = new FileReader();
-      reader.onloadend = async () => {
-        const base64DataUrl = reader.result as string;
-        const base64Data = base64DataUrl.split(',')[1];
+      const base64DataUrl = await readFileAsBase64(file);
+      const base64Data = base64DataUrl.split(',')[1];
+      const targetCount = Number(inputTotalQuestions) || totalQuestions || 25;
 
-        const targetCount = Number(inputTotalQuestions) || totalQuestions || 25;
+      const res = await fetch('/api/extract-key', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          imageBase64: base64Data,
+          mimeType: file.type,
+          totalQuestions: targetCount,
+          optionsPerQuestion
+        })
+      });
 
-        const res = await fetch('/api/extract-key', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            imageBase64: base64Data,
-            mimeType: file.type,
-            totalQuestions: targetCount,
-            optionsPerQuestion
-          })
-        });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to extract answers from master sheet');
+      }
 
-        const data = await res.json();
-        if (!res.ok) {
-          throw new Error(data.error || 'Failed to extract answers from master sheet');
-        }
+      const newKey: Record<number, string> = {};
+      const confidences: Record<number, number> = {};
+      let maxLetterCode = 64 + optionsPerQuestion;
 
-        const newKey: Record<number, string> = {};
-        const confidences: Record<number, number> = {};
-        if (Array.isArray(data.answers)) {
-          data.answers.forEach((item: any) => {
-            if (item.id && item.answer) {
-              newKey[item.id] = String(item.answer).toUpperCase();
-              if (typeof item.confidence === 'number') {
-                confidences[item.id] = item.confidence;
+      if (Array.isArray(data.answers)) {
+        data.answers.forEach((item: any) => {
+          const rawId = item.id !== undefined && item.id !== null ? String(item.id) : '';
+          const qId = parseInt(rawId.replace(/\D/g, ''), 10);
+
+          if (!isNaN(qId) && qId >= 1 && qId <= 100) {
+            if (item.answer && typeof item.answer === 'string') {
+              const letter = item.answer.trim().toUpperCase();
+              if (letter && letter !== 'NULL' && letter !== 'NONE' && letter !== 'BLANK') {
+                newKey[qId] = letter;
+                if (letter.length === 1 && letter.charCodeAt(0) > maxLetterCode) {
+                  maxLetterCode = Math.min(72, letter.charCodeAt(0)); // up to H (8 options)
+                }
               }
             }
-          });
-        }
+            if (typeof item.confidence === 'number') {
+              confidences[qId] = item.confidence;
+            }
+          }
+        });
+      }
 
-        const detectedCount = data.detectedTotalQuestions || targetCount;
-        setTotalQuestions(detectedCount);
-        setInputTotalQuestions(detectedCount);
-        setMasterKey(newKey);
-        setKeyConfidences(confidences);
-        setIsKeyConfigured(true);
+      const detectedCount = data.detectedTotalQuestions || targetCount;
+      const detectedOptions = Math.max(optionsPerQuestion, maxLetterCode - 64);
 
-        const extractedAnswersCount = Object.keys(newKey).length;
-        setExtractionNotice(`AI extracted ${extractedAnswersCount} answers from the master sheet. Please review below.`);
-      };
-      reader.readAsDataURL(file);
+      setTotalQuestions(detectedCount);
+      setInputTotalQuestions(detectedCount);
+      setOptionsPerQuestion(detectedOptions);
+      setMasterKey(newKey);
+      setKeyConfidences(confidences);
+      setMasterKeyImage(base64DataUrl);
+      setMasterKeyFileName(file.name);
+      setIsKeyConfigured(true);
+
+      const extractedAnswersCount = Object.keys(newKey).length;
+      setExtractionNotice(`AI successfully extracted ${extractedAnswersCount} answers from "${file.name}". Click "View Key" to inspect or adjust answers.`);
     } catch (err: any) {
-      console.error(err);
+      console.error("Master key extraction error:", err);
       alert(err.message || "Error extracting master key. Please check your network and Gemini API key.");
     } finally {
       setIsExtractingKey(false);
@@ -237,7 +291,7 @@ export function UploadView({
           imageBase64: base64DataUrl,
           results,
           score,
-          status: 'auto-graded',
+          status: 'marked',
           gradedAt: new Date().toISOString(),
         });
       } catch (err) {
@@ -271,10 +325,88 @@ export function UploadView({
         
         {/* Upload Zone */}
         <div className="lg:col-span-2 space-y-4">
-          <h2 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2 mb-3">
-            <UploadCloud className="w-4 h-4 text-blue-600" />
-            Batch Ingestion
-          </h2>
+          <div className="flex items-center justify-between">
+            <h2 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2">
+              <UploadCloud className="w-4 h-4 text-blue-600" />
+              Batch Ingestion
+            </h2>
+          </div>
+
+          {/* Master Key Extraction / Active Status Banner */}
+          {isExtractingKey ? (
+            <div className="bg-blue-50/90 border border-blue-200 rounded-xl p-4 flex items-center justify-between gap-4 animate-pulse">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-lg bg-blue-100 border border-blue-200 flex items-center justify-center text-blue-600 shrink-0">
+                  <Loader2 className="w-5 h-5 animate-spin" />
+                </div>
+                <div>
+                  <h4 className="text-xs font-bold text-blue-900">
+                    Scanning Master Answer Key with Gemini Vision...
+                  </h4>
+                  <p className="text-[11px] text-blue-700 mt-0.5">
+                    Extracting answers and confidence ratings. Please wait a moment.
+                  </p>
+                </div>
+              </div>
+            </div>
+          ) : isKeyConfigured || configuredCount > 0 ? (
+            <div className="bg-white border border-emerald-200 rounded-xl p-4 shadow-xs flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="w-9 h-9 rounded-xl bg-emerald-50 text-emerald-600 border border-emerald-200/80 flex items-center justify-center shrink-0">
+                  <CheckCircle2 className="w-5 h-5" />
+                </div>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs font-bold text-slate-900">
+                      Master Key Ready:
+                    </span>
+                    <span className="px-2 py-0.2 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                      {configuredCount} / {totalQuestions} Answers Marked
+                    </span>
+                    {avgConfidence !== null && (
+                      <span className="px-2 py-0.2 rounded-full text-[10px] font-bold bg-blue-50 text-blue-700 border border-blue-200">
+                        {avgConfidence}% AI Confidence
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-slate-500 mt-0.5 truncate">
+                    {masterKeyFileName ? (
+                      <>Source: <strong className="text-slate-700">{masterKeyFileName}</strong> • </>
+                    ) : null}
+                    Answer key is active and locked for batch grading. Click &ldquo;View Key&rdquo; to inspect or edit.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setShowKeyModal(true)}
+                  className="flex items-center gap-1.5 px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-lg transition-colors shadow-xs cursor-pointer"
+                >
+                  <Eye className="w-3.5 h-3.5" />
+                  <span>View Key</span>
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="bg-amber-50/70 border border-amber-200/70 rounded-xl p-3.5 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                <p className="text-xs text-amber-900">
+                  <strong>Notice:</strong> Master Answer Key is not loaded yet. Scan your master sheet on the right, or upload student sheets anytime.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => masterKeyFileInputRef.current?.click()}
+                className="shrink-0 flex items-center gap-1.5 px-2.5 py-1 bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer"
+              >
+                <Camera className="w-3.5 h-3.5" />
+                <span>Scan Key</span>
+              </button>
+            </div>
+          )}
           <div 
             onClick={() => !isGrading && fileInputRef.current?.click()}
             className={`border border-slate-200 rounded-xl bg-slate-50 p-12 text-center hover:bg-white hover:border-blue-300 transition-colors cursor-pointer group flex flex-col items-center justify-center ${isGrading ? 'opacity-75 pointer-events-none' : ''}`}
@@ -526,10 +658,10 @@ export function UploadView({
               </div>
             </div>
           ) : (
-            /* STEP 2: Expanded Answer Key Grid */
-            <div className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden flex flex-col max-h-[640px]">
+            /* STEP 2: Configured Master Key Card */
+            <div className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden flex flex-col">
               
-              {/* Header with configured summary and Reconfigure / Rescan options */}
+              {/* Header with configured summary and View Key / Rescan / Edit options */}
               <div className="p-4 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
                 <div>
                   <div className="flex items-center gap-2">
@@ -537,16 +669,30 @@ export function UploadView({
                     <span className="text-[10px] font-bold text-slate-500 bg-slate-200/80 px-2 py-0.5 rounded">
                       {currentOptions[0]} – {currentOptions[currentOptions.length - 1]}
                     </span>
+                    {avgConfidence !== null && (
+                      <span className="text-[10px] font-bold text-blue-700 bg-blue-50 border border-blue-200 px-1.5 py-0.2 rounded">
+                        {avgConfidence}% AI
+                      </span>
+                    )}
                   </div>
-                  <p className="text-[11px] text-slate-500 mt-0.5">
-                    {configuredCount} of {totalQuestions} answers marked
+                  <p className="text-[11px] text-slate-500 mt-0.5 truncate max-w-[180px]">
+                    {masterKeyFileName || `${configuredCount} of ${totalQuestions} answers marked`}
                   </p>
                 </div>
                 
                 <div className="flex items-center gap-1.5">
                   <button
+                    type="button"
+                    onClick={() => setShowKeyModal(true)}
+                    className="flex items-center gap-1 px-2.5 py-1 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-md transition-colors shadow-xs cursor-pointer"
+                    title="View and inspect all extracted answers in detail"
+                  >
+                    <Eye className="w-3.5 h-3.5" />
+                    <span>View Key</span>
+                  </button>
+                  <button
                     onClick={() => masterKeyFileInputRef.current?.click()}
-                    className="flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-blue-700 hover:text-blue-800 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-md transition-colors"
+                    className="flex items-center gap-1 px-2 py-1 text-xs font-semibold text-blue-700 hover:text-blue-800 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-md transition-colors cursor-pointer"
                     title="Upload another master answer sheet scan"
                   >
                     <Sparkles className="w-3 h-3 text-blue-600" />
@@ -554,7 +700,7 @@ export function UploadView({
                   </button>
                   <button
                     onClick={() => setIsKeyConfigured(false)}
-                    className="flex items-center gap-1 px-2 py-1 text-xs font-semibold text-slate-600 hover:text-blue-600 bg-white hover:bg-slate-50 border border-slate-200 rounded-md transition-colors"
+                    className="flex items-center gap-1 px-2 py-1 text-xs font-semibold text-slate-600 hover:text-blue-600 bg-white hover:bg-slate-50 border border-slate-200 rounded-md transition-colors cursor-pointer"
                     title="Modify question count or options"
                   >
                     <Pencil className="w-3 h-3" />
@@ -565,113 +711,192 @@ export function UploadView({
 
               {/* AI Extraction Success Notification Banner */}
               {extractionNotice && (
-                <div className="px-3.5 py-2 bg-emerald-50 border-b border-emerald-100 flex items-center justify-between text-xs text-emerald-800">
-                  <div className="flex items-center gap-1.5">
+                <div className="px-3.5 py-2.5 bg-emerald-50 border-b border-emerald-100 flex items-center justify-between text-xs text-emerald-800">
+                  <div className="flex items-center gap-1.5 min-w-0 mr-2">
                     <Sparkles className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                    <span className="font-medium text-[11px]">{extractionNotice}</span>
+                    <span className="font-medium text-[11px] truncate">{extractionNotice}</span>
                   </div>
-                  <button 
-                    onClick={() => setExtractionNotice(null)}
-                    className="text-emerald-600 hover:text-emerald-900 p-0.5 rounded"
-                  >
-                    <X className="w-3 h-3" />
-                  </button>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => setShowKeyModal(true)}
+                      className="text-xs font-bold text-emerald-700 hover:text-emerald-900 underline flex items-center gap-0.5"
+                    >
+                      <Eye className="w-3 h-3" />
+                      <span>View</span>
+                    </button>
+                    <button 
+                      onClick={() => setExtractionNotice(null)}
+                      className="text-emerald-600 hover:text-emerald-900 p-0.5 rounded"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </div>
                 </div>
               )}
 
-              {/* Quick Action Toolbar */}
-              <div className="px-4 py-2 border-b border-slate-100 bg-white flex items-center justify-between text-[11px]">
-                <div className="flex items-center gap-1.5">
-                  <span className="text-slate-400 font-semibold uppercase text-[10px]">Quick Fill:</span>
-                  {currentOptions.slice(0, 2).map((opt) => (
+              {/* Quick Answer Preview Strip */}
+              <div className="px-4 py-2 bg-slate-50/80 border-b border-slate-100 flex items-center justify-between text-xs">
+                <div className="flex items-center gap-1.5 overflow-x-auto py-0.5 scrollbar-none">
+                  <span className="text-[10px] font-bold text-slate-400 uppercase shrink-0">Keys:</span>
+                  {Array.from({ length: Math.min(6, totalQuestions) }, (_, i) => i + 1).map((qNum) => {
+                    const ans = masterKey[qNum];
+                    return (
+                      <span
+                        key={qNum}
+                        className={`shrink-0 inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[11px] font-mono font-bold ${
+                          ans 
+                            ? 'bg-white text-slate-800 border border-slate-200 shadow-2xs' 
+                            : 'bg-slate-200/50 text-slate-400'
+                        }`}
+                      >
+                        <span className="text-[9px] text-slate-400">Q{qNum}:</span>
+                        <span>{ans || '-'}</span>
+                      </span>
+                    );
+                  })}
+                  {totalQuestions > 6 && (
                     <button
-                      key={opt}
-                      onClick={() => handleQuickFill(opt)}
-                      className="px-2 py-0.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium rounded transition-colors"
+                      type="button"
+                      onClick={() => setShowKeyModal(true)}
+                      className="shrink-0 text-[11px] font-semibold text-blue-600 hover:text-blue-700 hover:underline ml-1"
                     >
-                      All {opt}
+                      +{totalQuestions - 6} more...
                     </button>
-                  ))}
+                  )}
                 </div>
+
                 <button
-                  onClick={handleClearKey}
-                  className="text-slate-400 hover:text-red-600 font-medium transition-colors"
+                  type="button"
+                  onClick={() => setShowInlineGrid(!showInlineGrid)}
+                  className="shrink-0 text-slate-500 hover:text-slate-700 text-[11px] font-medium flex items-center gap-0.5 ml-2 cursor-pointer"
+                  title={showInlineGrid ? "Collapse inline list" : "Expand inline list"}
                 >
-                  Clear All
+                  <span>{showInlineGrid ? "Hide" : "Expand"}</span>
+                  {showInlineGrid ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
                 </button>
               </div>
 
-              {/* Scrollable Questions List */}
-              <div className="p-4 flex-1 overflow-y-auto space-y-2.5 divide-y divide-slate-100">
-                {Array.from({ length: totalQuestions }, (_, i) => i + 1).map((qNum) => {
-                  const selectedAnswer = masterKey[qNum];
-                  const confidence = keyConfidences[qNum];
-                  const isLowConfidence = typeof confidence === 'number' && confidence < 80;
-
-                  return (
-                    <div key={qNum} className="flex items-center justify-between pt-2.5 first:pt-0">
-                      <div className="flex items-center gap-2">
-                        <span className="w-8 text-xs font-bold text-slate-600">Q{qNum}</span>
-                        {selectedAnswer ? (
-                          isLowConfidence ? (
-                            <span 
-                              className="text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded px-1 flex items-center gap-0.5"
-                              title={`Low AI confidence (${confidence}%). Please double-check.`}
-                            >
-                              <AlertTriangle className="w-2.5 h-2.5 text-amber-500" />
-                              {confidence}%
-                            </span>
-                          ) : (
-                            <span 
-                              className="w-2 h-2 rounded-full bg-emerald-500" 
-                              title={confidence ? `High confidence (${confidence}%)` : "Answer set"}
-                            />
-                          )
-                        ) : (
-                          <span className="w-2 h-2 rounded-full bg-slate-200" title="Unset" />
-                        )}
-                      </div>
-                      <div className="flex gap-1">
-                        {currentOptions.map((opt) => {
-                          const isSelected = selectedAnswer === opt;
-                          return (
-                            <button
-                              key={opt}
-                              type="button"
-                              onClick={() => handleKeySelect(qNum, opt)}
-                              className={`w-7 h-7 rounded text-xs font-bold transition-all border ${
-                                isSelected
-                                  ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
-                                  : 'bg-white text-slate-600 hover:bg-slate-100 hover:border-slate-300 border-slate-200'
-                              }`}
-                            >
-                              {opt}
-                            </button>
-                          );
-                        })}
-                      </div>
+              {/* Collapsible Inline Grid */}
+              {showInlineGrid && (
+                <>
+                  {/* Quick Action Toolbar */}
+                  <div className="px-4 py-2 border-b border-slate-100 bg-white flex items-center justify-between text-[11px]">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-slate-400 font-semibold uppercase text-[10px]">Quick Fill:</span>
+                      {currentOptions.slice(0, 2).map((opt) => (
+                        <button
+                          key={opt}
+                          onClick={() => handleQuickFill(opt)}
+                          className="px-2 py-0.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium rounded transition-colors"
+                        >
+                          All {opt}
+                        </button>
+                      ))}
                     </div>
-                  );
-                })}
-              </div>
+                    <button
+                      onClick={handleClearKey}
+                      className="text-slate-400 hover:text-red-600 font-medium transition-colors"
+                    >
+                      Clear All
+                    </button>
+                  </div>
+
+                  {/* Scrollable Questions List */}
+                  <div className="p-4 max-h-[360px] overflow-y-auto space-y-2.5 divide-y divide-slate-100">
+                    {Array.from({ length: totalQuestions }, (_, i) => i + 1).map((qNum) => {
+                      const selectedAnswer = masterKey[qNum];
+                      const confidence = keyConfidences[qNum];
+                      const isLowConfidence = typeof confidence === 'number' && confidence < 80;
+
+                      return (
+                        <div key={qNum} className="flex items-center justify-between pt-2.5 first:pt-0">
+                          <div className="flex items-center gap-2">
+                            <span className="w-8 text-xs font-bold text-slate-600">Q{qNum}</span>
+                            {selectedAnswer ? (
+                              isLowConfidence ? (
+                                <span 
+                                  className="text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded px-1 flex items-center gap-0.5"
+                                  title={`Low AI confidence (${confidence}%). Please double-check.`}
+                                >
+                                  <AlertTriangle className="w-2.5 h-2.5 text-amber-500" />
+                                  {confidence}%
+                                </span>
+                              ) : (
+                                <span 
+                                  className="w-2 h-2 rounded-full bg-emerald-500" 
+                                  title={confidence ? `High confidence (${confidence}%)` : "Answer set"}
+                                />
+                              )
+                            ) : (
+                              <span className="w-2 h-2 rounded-full bg-slate-200" title="Unset" />
+                            )}
+                          </div>
+                          <div className="flex gap-1">
+                            {currentOptions.map((opt) => {
+                              const isSelected = selectedAnswer === opt;
+                              return (
+                                <button
+                                  key={opt}
+                                  type="button"
+                                  onClick={() => handleKeySelect(qNum, opt)}
+                                  className={`w-7 h-7 rounded text-xs font-bold transition-all border ${
+                                    isSelected
+                                      ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
+                                      : 'bg-white text-slate-600 hover:bg-slate-100 hover:border-slate-300 border-slate-200'
+                                  }`}
+                                >
+                                  {opt}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
 
               {/* Footer */}
               <div className="p-3 border-t border-slate-100 bg-slate-50 flex items-center justify-between">
                 <div className="flex items-center gap-1.5 text-xs text-slate-600">
                   <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-                  <span>Key synced & active</span>
+                  <span>Key active ({configuredCount}/{totalQuestions})</span>
                 </div>
                 <button 
-                  onClick={() => alert("Master Key confirmed and ready for grading.")}
-                  className="px-3 py-1.5 bg-blue-600 text-white font-semibold rounded text-xs hover:bg-blue-700 transition-colors shadow-xs"
+                  type="button"
+                  onClick={() => setShowKeyModal(true)}
+                  className="px-3 py-1.5 bg-blue-600 text-white font-semibold rounded text-xs hover:bg-blue-700 transition-colors shadow-xs flex items-center gap-1 cursor-pointer"
                 >
-                  Confirm Key
+                  <Eye className="w-3.5 h-3.5" />
+                  <span>View Key</span>
                 </button>
               </div>
             </div>
           )}
         </div>
       </div>
+
+      {/* Master Key Inspector Modal */}
+      <MasterKeyModal
+        isOpen={showKeyModal}
+        onClose={() => setShowKeyModal(false)}
+        totalQuestions={totalQuestions}
+        masterKey={masterKey}
+        keyConfidences={keyConfidences}
+        onKeySelect={handleKeySelect}
+        onQuickFill={handleQuickFill}
+        onClearKey={handleClearKey}
+        optionsPerQuestion={optionsPerQuestion}
+        currentOptions={currentOptions}
+        masterKeyFileName={masterKeyFileName}
+        masterKeyImage={masterKeyImage}
+        onRescanClick={() => {
+          setShowKeyModal(false);
+          masterKeyFileInputRef.current?.click();
+        }}
+      />
     </div>
   );
 }

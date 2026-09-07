@@ -38,10 +38,32 @@ export function ModerationView({
   const liveScore = Math.round((correctCount / totalQuestions) * 100);
 
   const handleOverride = (questionId: number, overrideAnswer: string) => {
+    const targetQ = results.find(q => q.id === questionId);
+    const prevDetected = targetQ ? targetQ.detected : null;
+
+    // Log teacher correction asynchronously to PostgreSQL feedback loop
+    fetch('/api/corrections', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        questionId,
+        source: 'student_moderation',
+        aiDetected: prevDetected,
+        teacherCorrected: overrideAnswer,
+        studentId: currentStudent.studentId,
+        notes: `Teacher changed from ${prevDetected ?? 'blank'} to ${overrideAnswer} during student moderation`
+      })
+    }).catch(err => console.error("Failed to log student moderation correction:", err));
+
     const updatedResults = results.map(q => {
       if (q.id === questionId) {
-        const isCorrect = overrideAnswer === q.correct;
-        return { ...q, detected: overrideAnswer, status: (isCorrect ? 'correct' : 'incorrect') as QuestionResult['status'] };
+        const isCorrect = overrideAnswer.trim().toUpperCase() === q.correct.trim().toUpperCase();
+        return { 
+          ...q, 
+          detected: overrideAnswer, 
+          status: (isCorrect ? 'correct' : 'incorrect') as QuestionResult['status'],
+          confidence: 100
+        };
       }
       return q;
     });

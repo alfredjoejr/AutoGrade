@@ -14,7 +14,7 @@ export type StudentGradingResult = {
   imageBase64: string;        // Scanned sheet for moderation view
   results: QuestionResult[];  // Per-question grading
   score: number;              // Percentage (correct / total * 100)
-  status: 'auto-graded' | 'reviewed';
+  status: 'marked' | 'reviewed';
   gradedAt: string;           // ISO timestamp
 };
 
