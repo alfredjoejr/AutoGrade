@@ -74,6 +74,14 @@ export async function initSchema(): Promise<void> {
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
 
+    CREATE TABLE IF NOT EXISTS master_key_cache (
+      hash TEXT PRIMARY KEY,
+      total_questions INTEGER NOT NULL,
+      options_per_question INTEGER NOT NULL,
+      answers JSONB NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
     CREATE TABLE IF NOT EXISTS student_results (
       id SERIAL PRIMARY KEY,
       batch_id UUID REFERENCES batch_sessions(id) ON DELETE CASCADE,
@@ -278,6 +286,45 @@ export async function getAdminStats(): Promise<{
     totalStudents: studentStats.rows[0].cnt,
     overallAverage: Number(studentStats.rows[0].avg),
   };
+}
+
+// ─── Master Key Caching ──────────────────────────────────────────────
+
+export async function getCachedMasterKey(hash: string): Promise<{
+  totalQuestions: number;
+  optionsPerQuestion: number;
+  answers: any[];
+} | null> {
+  const db = getPool();
+  const res = await db.query(
+    'SELECT total_questions, options_per_question, answers FROM master_key_cache WHERE hash = $1',
+    [hash]
+  );
+  if (res.rows.length === 0) return null;
+  return {
+    totalQuestions: res.rows[0].total_questions,
+    optionsPerQuestion: res.rows[0].options_per_question,
+    answers: res.rows[0].answers,
+  };
+}
+
+export async function saveCachedMasterKey(
+  hash: string,
+  totalQuestions: number,
+  optionsPerQuestion: number,
+  answers: any[]
+): Promise<void> {
+  const db = getPool();
+  await db.query(
+    `INSERT INTO master_key_cache (hash, total_questions, options_per_question, answers)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (hash) DO UPDATE SET
+       total_questions = EXCLUDED.total_questions,
+       options_per_question = EXCLUDED.options_per_question,
+       answers = EXCLUDED.answers,
+       created_at = NOW()`,
+    [hash, totalQuestions, optionsPerQuestion, JSON.stringify(answers)]
+  );
 }
 
 // ─── Human-in-the-Loop Corrections & AI Tuning ────────────────────────

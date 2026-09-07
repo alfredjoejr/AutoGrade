@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { initSchema, getRecentCorrections } from "@/lib/db";
+import { initSchema, getRecentCorrections, getCachedMasterKey, saveCachedMasterKey } from "@/lib/db";
 import { generateVisionContentWithFallback } from "@/lib/vision-ai";
+import crypto from 'crypto';
 
 export async function POST(req: NextRequest) {
   try {
@@ -23,6 +24,18 @@ export async function POST(req: NextRequest) {
     }
 
     await initSchema();
+
+    const imageHash = crypto.createHash('sha256').update(imageBase64).digest('hex');
+    const cachedData = await getCachedMasterKey(imageHash);
+
+    if (cachedData) {
+      return NextResponse.json({
+        success: true,
+        modelUsed: "cache",
+        detectedTotalQuestions: cachedData.totalQuestions,
+        answers: cachedData.answers,
+      });
+    }
 
     // Query recent educator corrections for Tier 1 In-Context Learning
     const recentCorrections = await getRecentCorrections('master_key', 6);
@@ -94,11 +107,16 @@ export async function POST(req: NextRequest) {
     const cleanedText = rawText.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
     const result = JSON.parse(cleanedText || "{}");
 
+    const detectedTotalQuestions = result.detectedTotalQuestions || totalQuestions;
+    const answers = result.answers || [];
+
+    await saveCachedMasterKey(imageHash, detectedTotalQuestions, optionsPerQuestion, answers);
+
     return NextResponse.json({
       success: true,
       modelUsed,
-      detectedTotalQuestions: result.detectedTotalQuestions || totalQuestions,
-      answers: result.answers || []
+      detectedTotalQuestions,
+      answers
     });
 
   } catch (error: any) {
