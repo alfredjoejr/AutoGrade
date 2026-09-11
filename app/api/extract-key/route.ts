@@ -1,10 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
-import { initSchema, getRecentCorrections, getCachedMasterKey, saveCachedMasterKey } from "@/lib/db";
-import { generateVisionContentWithFallback } from "@/lib/vision-ai";
+import { initSchema, getRecentCorrections, getCachedMasterKey } from "@/lib/db";
+import { getSessionFromRequest } from "@/lib/auth";
+import { runDualAgents } from "@/lib/agents/agent-runner";
+import { compareKeyExtractions } from "@/lib/agents/consensus-engine";
 import crypto from 'crypto';
 
 export async function POST(req: NextRequest) {
   try {
+    const session = getSessionFromRequest(req);
+    if (session && session.role === 'student') {
+      return NextResponse.json(
+        { error: "Forbidden: Only educators and teachers are authorized to configure or extract master keys." },
+        { status: 403 }
+      );
+    }
+
     const body = await req.json();
     const { imageBase64, mimeType, totalQuestions = 25, optionsPerQuestion = 4 } = body;
 
@@ -25,6 +35,7 @@ export async function POST(req: NextRequest) {
 
     await initSchema();
 
+    // Check cache first
     const imageHash = crypto.createHash('sha256').update(imageBase64).digest('hex');
     const cachedData = await getCachedMasterKey(imageHash);
 
@@ -32,19 +43,20 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({
         success: true,
         modelUsed: "cache",
+        dualAgent: false,
         detectedTotalQuestions: cachedData.totalQuestions,
         answers: cachedData.answers,
       });
     }
 
-    // Query recent educator corrections for Tier 1 In-Context Learning
+    // Query recent educator corrections for In-Context Learning
     const recentCorrections = await getRecentCorrections('master_key', 6);
     const fewShotSection = recentCorrections.length > 0
       ? `\n5. DYNAMIC FEW-SHOT CORRECTIONS (Verified ground truth from previous teacher moderation):\n` +
         recentCorrections.map(c => `   - Question ${c.questionId}: Educator verified choice is "${c.teacherCorrected}". Previous AI detected: "${c.aiDetected || 'none'}".`).join('\n') + '\n'
       : '';
 
-    const maxLetters = String.fromCharCode(64 + Math.min(optionsPerQuestion, 8)); // e.g. 'D' for 4, 'E' for 5
+    const maxLetters = String.fromCharCode(64 + Math.min(optionsPerQuestion, 8));
     const prompt = `
       You are an expert OCR and grading vision assistant specialized in extracting multiple-choice master answer keys from scanned sheets.
       Carefully examine the provided image of an MCQ master answer key sheet.
@@ -94,29 +106,87 @@ export async function POST(req: NextRequest) {
       }
     `;
 
-    const { text: rawText, modelUsed } = await generateVisionContentWithFallback({
+    // ─── Dual-Agent Execution ────────────────────────────────────────
+    type KeyExtractionData = {
+      detectedTotalQuestions: number;
+      answers: Array<{ id: number; answer: string | null; confidence: number }>;
+    };
+
+    const { agentA, agentB, singleAgentFallback } = await runDualAgents<KeyExtractionData>({
       apiKey,
       prompt,
       imageBase64,
-      mimeType: mimeType || "image/jpeg",
-      temperature: 0.1,
-      responseMimeType: "application/json",
+      mimeType: mimeType || 'image/jpeg',
+      responseMimeType: 'application/json',
     });
 
-    // Clean any potential markdown wrapping if present
-    const cleanedText = rawText.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
-    const result = JSON.parse(cleanedText || "{}");
+    // Extract answers arrays from agents
+    const agentAAnswers = agentA.success ? (agentA.data.answers || []) : [];
+    const agentBAnswers = agentB.success ? (agentB.data.answers || []) : [];
 
-    const detectedTotalQuestions = result.detectedTotalQuestions || totalQuestions;
-    const answers = result.answers || [];
+    // Run consensus comparison
+    const { consensus, summary } = singleAgentFallback
+      ? {
+          consensus: (agentA.success ? agentAAnswers : agentBAnswers).map((a: any) => ({
+            questionId: a.id,
+            agentAAnswer: agentA.success ? String(a.answer || '').toUpperCase() || null : null,
+            agentAConfidence: agentA.success ? a.confidence : 0,
+            agentBAnswer: agentB.success ? String(a.answer || '').toUpperCase() || null : null,
+            agentBConfidence: agentB.success ? a.confidence : 0,
+            consensusStatus: 'agreed' as const,
+            recommendedAnswer: String(a.answer || '').toUpperCase() || null,
+            avgConfidence: a.confidence,
+          })),
+          summary: {
+            totalQuestions: (agentA.success ? agentAAnswers : agentBAnswers).length,
+            agreedCount: (agentA.success ? agentAAnswers : agentBAnswers).length,
+            disagreedCount: 0,
+            partialCount: 0,
+            agreementRate: 100,
+            autoApprovable: true,
+          },
+        }
+      : compareKeyExtractions(agentAAnswers, agentBAnswers);
 
-    await saveCachedMasterKey(imageHash, detectedTotalQuestions, optionsPerQuestion, answers);
+    // Build merged answers from consensus recommendations
+    const mergedAnswers = consensus.map((c: any) => ({
+      id: c.questionId,
+      answer: c.recommendedAnswer,
+      confidence: c.avgConfidence,
+    }));
 
+    const detectedTotalQuestions = agentA.success
+      ? (agentA.data.detectedTotalQuestions || totalQuestions)
+      : (agentB.data.detectedTotalQuestions || totalQuestions);
+
+    // ─── Return dual-agent results for teacher review (NO auto-save to cache) ───
     return NextResponse.json({
       success: true,
-      modelUsed,
+      dualAgent: true,
+      singleAgentFallback,
+      imageHash,
       detectedTotalQuestions,
-      answers
+      // Merged recommended answers (teacher can override before approving)
+      answers: mergedAnswers,
+      // Full dual-agent data for the consensus review UI
+      agentA: {
+        model: agentA.model,
+        label: agentA.label,
+        success: agentA.success,
+        error: agentA.error,
+        durationMs: agentA.durationMs,
+        answers: agentAAnswers,
+      },
+      agentB: {
+        model: agentB.model,
+        label: agentB.label,
+        success: agentB.success,
+        error: agentB.error,
+        durationMs: agentB.durationMs,
+        answers: agentBAnswers,
+      },
+      consensus,
+      summary,
     });
 
   } catch (error: any) {

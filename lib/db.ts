@@ -100,8 +100,31 @@ export async function initSchema(): Promise<void> {
       username TEXT UNIQUE NOT NULL,
       password_hash TEXT NOT NULL,
       display_name TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'teacher',
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
+
+    -- Ensure role column exists if table was created previously
+    ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'teacher';
+
+    CREATE TABLE IF NOT EXISTS student_submissions (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      student_id TEXT NOT NULL,
+      student_name TEXT NOT NULL,
+      assignment_title TEXT DEFAULT 'General MCQ Assessment',
+      file_name TEXT NOT NULL,
+      mime_type TEXT NOT NULL,
+      image_base64 TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      batch_id UUID,
+      score NUMERIC(5,2),
+      results JSONB,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      graded_at TIMESTAMPTZ
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_submissions_status ON student_submissions(status);
+    CREATE INDEX IF NOT EXISTS idx_submissions_student_id ON student_submissions(student_id);
 
     CREATE TABLE IF NOT EXISTS teacher_corrections (
       id SERIAL PRIMARY KEY,
@@ -120,34 +143,45 @@ export async function initSchema(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_corrections_created ON teacher_corrections(created_at DESC);
   `);
 
-  // Seed default admin if no admins exist
-  await seedDefaultAdmin();
+  // Seed default users (admin, teacher, student)
+  await seedDefaultUsers();
 }
 
-// ─── Admin Users ─────────────────────────────────────────────────────
+// ─── Users & Roles ───────────────────────────────────────────────────
 
-/** Seed a default admin user if no admin exists */
-async function seedDefaultAdmin(): Promise<void> {
+export type UserRole = 'teacher' | 'student' | 'admin';
+
+/** Seed default users if they do not already exist */
+async function seedDefaultUsers(): Promise<void> {
   const db = getPool();
-  const existing = await db.query('SELECT COUNT(*)::integer AS cnt FROM admin_users');
-  if (existing.rows[0].cnt === 0) {
-    const passwordHash = await hashPassword('admin123');
-    await db.query(
-      `INSERT INTO admin_users (username, password_hash, display_name) VALUES ($1, $2, $3)`,
-      ['admin', passwordHash, 'Administrator']
-    );
-    console.log('[AutoGrade] Default admin user created → username: admin / password: admin123');
+
+  const defaultUsers = [
+    { username: 'admin', pass: 'admin123', name: 'Administrator', role: 'admin' },
+    { username: 'teacher', pass: 'teacher123', name: 'Teacher Sarah', role: 'teacher' },
+    { username: 'student', pass: 'student123', name: 'Student Alex', role: 'student' },
+  ];
+
+  for (const u of defaultUsers) {
+    const existing = await db.query('SELECT id FROM admin_users WHERE username = $1', [u.username]);
+    if (existing.rows.length === 0) {
+      const passwordHash = await hashPassword(u.pass);
+      await db.query(
+        `INSERT INTO admin_users (username, password_hash, display_name, role) VALUES ($1, $2, $3, $4)`,
+        [u.username, passwordHash, u.name, u.role]
+      );
+      console.log(`[AutoGrade] Default ${u.role} user created → username: ${u.username} / password: ${u.pass}`);
+    }
   }
 }
 
-/** Verify admin credentials — returns the user object or null */
-export async function verifyAdminCredentials(
+/** Verify user credentials — returns user with role or null */
+export async function verifyUserCredentials(
   username: string,
   password: string
-): Promise<{ id: number; username: string; displayName: string } | null> {
+): Promise<{ id: number; username: string; displayName: string; role: UserRole } | null> {
   const db = getPool();
   const result = await db.query(
-    'SELECT id, username, password_hash, display_name FROM admin_users WHERE username = $1',
+    'SELECT id, username, password_hash, display_name, role FROM admin_users WHERE username = $1',
     [username]
   );
 
@@ -161,7 +195,16 @@ export async function verifyAdminCredentials(
     id: row.id,
     username: row.username,
     displayName: row.display_name,
+    role: (row.role || 'teacher') as UserRole,
   };
+}
+
+/** Legacy alias for backward compatibility */
+export async function verifyAdminCredentials(
+  username: string,
+  password: string
+): Promise<{ id: number; username: string; displayName: string; role: UserRole } | null> {
+  return verifyUserCredentials(username, password);
 }
 
 // ─── Batch Results ───────────────────────────────────────────────────
@@ -468,3 +511,113 @@ export async function getTuningDatasetJSONL(): Promise<string> {
 
   return lines.join('\n');
 }
+
+// ─── Student Submissions ─────────────────────────────────────────────
+
+export type StudentSubmissionRecord = {
+  id: string;
+  student_id: string;
+  student_name: string;
+  assignment_title: string;
+  file_name: string;
+  mime_type: string;
+  image_base64: string;
+  status: 'pending' | 'processing' | 'graded';
+  batch_id?: string | null;
+  score?: number | null;
+  results?: any[] | null;
+  created_at: string;
+  graded_at?: string | null;
+};
+
+/** Create a new student answer sheet submission */
+export async function createStudentSubmission(submission: {
+  studentId: string;
+  studentName: string;
+  assignmentTitle?: string;
+  fileName: string;
+  mimeType: string;
+  imageBase64: string;
+}): Promise<StudentSubmissionRecord> {
+  const db = getPool();
+  const res = await db.query(
+    `INSERT INTO student_submissions 
+       (student_id, student_name, assignment_title, file_name, mime_type, image_base64, status)
+     VALUES ($1, $2, $3, $4, $5, $6, 'pending')
+     RETURNING *`,
+    [
+      submission.studentId.trim(),
+      submission.studentName.trim(),
+      submission.assignmentTitle?.trim() || 'General MCQ Assessment',
+      submission.fileName,
+      submission.mimeType,
+      submission.imageBase64,
+    ]
+  );
+  return res.rows[0];
+}
+
+/** Get student submissions with optional filters */
+export async function getStudentSubmissions(filters?: {
+  status?: string;
+  studentId?: string;
+  limit?: number;
+}): Promise<StudentSubmissionRecord[]> {
+  const db = getPool();
+  const conditions: string[] = [];
+  const params: any[] = [];
+
+  if (filters?.status && filters.status !== 'all') {
+    params.push(filters.status);
+    conditions.push(`status = $${params.length}`);
+  }
+
+  if (filters?.studentId) {
+    params.push(filters.studentId);
+    conditions.push(`student_id = $${params.length}`);
+  }
+
+  const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+  const limitClause = filters?.limit ? `LIMIT ${Number(filters.limit)}` : 'LIMIT 100';
+
+  const res = await db.query(
+    `SELECT id, student_id, student_name, assignment_title, file_name, mime_type, image_base64, status, batch_id, score, results, created_at, graded_at
+     FROM student_submissions
+     ${whereClause}
+     ORDER BY created_at DESC
+     ${limitClause}`,
+    params
+  );
+  return res.rows;
+}
+
+/** Get a single student submission by ID */
+export async function getStudentSubmissionById(id: string): Promise<StudentSubmissionRecord | null> {
+  const db = getPool();
+  const res = await db.query(
+    `SELECT * FROM student_submissions WHERE id = $1`,
+    [id]
+  );
+  return res.rows[0] || null;
+}
+
+/** Update status and grading result for a student submission */
+export async function updateStudentSubmissionGrading(
+  id: string,
+  batchId: string,
+  score: number,
+  results: any[]
+): Promise<void> {
+  const db = getPool();
+  await db.query(
+    `UPDATE student_submissions
+     SET status = 'graded',
+         batch_id = $1,
+         score = $2,
+         results = $3,
+         graded_at = NOW()
+     WHERE id = $4`,
+    [batchId, score, JSON.stringify(results), id]
+  );
+}
+

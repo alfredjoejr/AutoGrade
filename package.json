@@ -7,15 +7,20 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "clean": "node -e \"fs.rmSync('.next', { recursive: true, force: true }); fs.rmSync('out', { recursive: true, force: true }); fs.rmSync('.turbo', { recursive: true, force: true });\""
+    "clean": "node -e \"fs.rmSync('.next', { recursive: true, force: true }); fs.rmSync('out', { recursive: true, force: true }); fs.rmSync('.turbo', { recursive: true, force: true });\"",
+    "redis": "redis-server",
+    "worker": "tsx worker.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
     "@hookform/resolvers": "^5.2.1",
     "@types/pg": "^8.23.1",
     "autoprefixer": "^10.4.21",
+    "bullmq": "^6.3.4",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "dotenv": "^17.4.2",
+    "ioredis": "^6.0.0",
     "lucide-react": "^0.553.0",
     "motion": "^12.23.24",
     "next": "^15.4.9",
@@ -24,7 +29,8 @@
     "react": "^19.2.1",
     "react-dom": "^19.2.1",
     "recharts": "^3.10.1",
-    "tailwind-merge": "^3.3.1"
+    "tailwind-merge": "^3.3.1",
+    "tsx": "^4.23.13"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "4.1.11",

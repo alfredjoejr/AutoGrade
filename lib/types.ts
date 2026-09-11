@@ -26,3 +26,25 @@ export type BatchSession = {
   students: StudentGradingResult[];
   createdAt: string;
 };
+
+// ─── Dual-Agent Consensus Types ──────────────────────────────────────
+
+import type { ConsensusStatus } from '@/lib/agents/agent-types';
+
+/** Extended question result with consensus metadata from dual agents */
+export type ConsensusQuestionResultView = QuestionResult & {
+  consensusStatus: ConsensusStatus;
+  agentADetected: string | null;
+  agentBDetected: string | null;
+};
+
+/** Student grading result enriched with dual-agent consensus data */
+export type DualAgentStudentResult = StudentGradingResult & {
+  consensusResults?: ConsensusQuestionResultView[];
+  agreementRate?: number;
+  singleAgentFallback?: boolean;
+  approvalStatus: ApprovalStatus;
+};
+
+/** Approval status for teacher review gate */
+export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'manual_review';

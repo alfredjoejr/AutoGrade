@@ -33,6 +33,7 @@ interface MasterKeyModalProps {
   masterKeyFileName: string | null;
   masterKeyImage: string | null;
   onRescanClick: () => void;
+  consensusSummary?: { agreementRate: number; totalDisagreed?: number } | null;
 }
 
 export function MasterKeyModal({
@@ -47,7 +48,8 @@ export function MasterKeyModal({
   currentOptions,
   masterKeyFileName,
   masterKeyImage,
-  onRescanClick
+  onRescanClick,
+  consensusSummary
 }: MasterKeyModalProps) {
   const [activeTab, setActiveTab] = useState<'grid' | 'split' | 'sheet'>('grid');
   const [filterMode, setFilterMode] = useState<'all' | 'flagged' | 'unset'>('all');
@@ -138,6 +140,12 @@ export function MasterKeyModal({
                 {confidenceStats.avg !== null && (
                   <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-blue-50 text-blue-700 border border-blue-200">
                     {confidenceStats.avg}% AI Confidence
+                  </span>
+                )}
+                {consensusSummary && (
+                  <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200 flex items-center gap-1">
+                    <Sparkles className="w-3 h-3 text-indigo-500" />
+                    Dual-Agent ({consensusSummary.agreementRate}% match)
                   </span>
                 )}
               </div>
